@@ -11,4 +11,4 @@ Licenciatura en Ingeniería en Ciencia de Datos
 
 ## Contenido
 
-Repositorio para la entrega de las actividades de la **Unidad 2**. Cada producto se encuentra en su propia carpeta.
+Repositorio para la entrega de las actividades de la **Unidad 2**.
