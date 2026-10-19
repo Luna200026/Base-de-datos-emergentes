@@ -1,0 +1,278 @@
+"""
+Práctica 10. Integración de MongoDB con Python, PyMongo y Pandas
+Bases de Datos Emergentes - Facultad de Informática Culiacán (UAS)
+Alumno: Luna Peña Jose Eduardo
+
+Ejecutar con MongoDB activo:
+    python Practica10-Python-Pandas.py
+
+Genera:
+    Practica10-resumen-estados.csv
+    Practica10-importe-por-mes.csv
+    Practica10-analisis-adicional.csv
+"""
+
+from pymongo import MongoClient, DESCENDING
+from pymongo.errors import PyMongoError
+from bson.decimal128 import Decimal128
+import pandas as pd
+
+URI = "mongodb://localhost:27017/"
+BASE = "ventas_online"
+
+pd.set_option("display.width", 140)
+pd.set_option("display.max_columns", 20)
+
+
+def titulo(texto):
+    print("\n" + "=" * 70)
+    print(texto)
+    print("=" * 70)
+
+
+def a_numero(valor):
+    """Convierte Decimal128 a float solo para el análisis (posible pérdida de precisión)."""
+    if isinstance(valor, Decimal128):
+        return float(valor.to_decimal())
+    return valor
+
+
+# Ejercicio 1. Ping y conteos de las cuatro colecciones
+def ejercicio1(cliente, db):
+    titulo("Ejercicio 1. Conexión (ping) y conteos")
+    respuesta = cliente.admin.command("ping")
+    print("Ping:", respuesta)
+    print("Conectado a:", db.name)
+    print("Colecciones:", db.list_collection_names())
+    for nombre in ["productos", "clientes", "proveedores", "ventas"]:
+        print(f"  {nombre:<12} {db[nombre].count_documents({})}")
+
+
+# Ejercicio 2. Cinco productos con precio > 5000, de mayor a menor
+def ejercicio2(db):
+    titulo("Ejercicio 2. Productos con precio mayor a 5,000")
+    filtro = {"precio": {"$gt": 5000}}
+    campos = {"_id": 0, "sku": 1, "nombre": 1, "precio": 1}
+    for doc in db.productos.find(filtro, campos).sort("precio", DESCENDING).limit(5):
+        print(doc)
+
+
+# Ejercicio 3. Ventas de C001 con venta_id, fecha, estado y total
+def ejercicio3(db):
+    titulo("Ejercicio 3. Ventas del cliente C001")
+    campos = {"_id": 0, "venta_id": 1, "fecha": 1, "estado": 1, "total": 1}
+    ventas_c001 = list(db.ventas.find({"cliente_id": "C001"}, campos).sort("fecha", 1))
+    for doc in ventas_c001:
+        print(doc)
+    print("Total de ventas de C001:", len(ventas_c001))
+
+
+# Ejercicio 4. CRUD en practica10_temporal con contadores
+def ejercicio4(db):
+    titulo("Ejercicio 4. CRUD en practica10_temporal")
+    col = db["practica10_temporal"]
+    clave = {"origen": "practica10", "codigo": "LAB10"}
+
+    limpieza = col.delete_many(clave)  # solo borra la prueba identificada
+    print("Limpieza previa, eliminados:", limpieza.deleted_count)
+    try:
+        insertado = col.insert_one({**clave, "nombre": "Documento de prueba",
+                                    "stock": 5, "precio": 100})
+        print("INSERT  -> inserted_id:", insertado.inserted_id)
+
+        leido = col.find_one(clave, {"_id": 0})
+        print("READ    -> documento:", leido)
+
+        actualizado = col.update_one(clave, {"$set": {"precio": 150},
+                                             "$inc": {"stock": 10}})
+        print("UPDATE  -> matched_count:", actualizado.matched_count,
+              "| modified_count:", actualizado.modified_count)
+        print("          después del cambio:", col.find_one(clave, {"_id": 0}))
+    finally:
+        eliminado = col.delete_one(clave)
+        print("DELETE  -> deleted_count:", eliminado.deleted_count)
+        print("Documentos de prueba restantes:", col.count_documents(clave))
+
+
+# Ejercicio 5. aggregate(): número e importe registrado por estado
+def ejercicio5(db):
+    titulo("Ejercicio 5. Ventas e importe registrado por estado (MongoDB)")
+    pipeline = [
+        {"$group": {"_id": "$estado",
+                    "ventas": {"$sum": 1},
+                    "importe_registrado": {"$sum": "$total"}}},
+        {"$sort": {"importe_registrado": -1}},
+    ]
+    resultado = list(db.ventas.aggregate(pipeline))
+    for fila in resultado:
+        fila["importe_registrado"] = a_numero(fila["importe_registrado"])
+        print(fila)
+    return resultado
+
+
+# Ejercicio 6. $lookup ventas-clientes, diez resultados
+def ejercicio6(db):
+    titulo("Ejercicio 6. Ventas relacionadas con clientes ($lookup)")
+    pipeline = [
+        {"$lookup": {"from": "clientes", "localField": "cliente_id",
+                     "foreignField": "cliente_id", "as": "datos_cliente"}},
+        {"$unwind": {"path": "$datos_cliente", "preserveNullAndEmptyArrays": True}},
+        {"$project": {"_id": 0, "venta_id": 1, "cliente_id": 1, "estado": 1,
+                      "total": 1, "nombre_cliente": "$datos_cliente.nombre"}},
+        {"$limit": 10},
+    ]
+    for fila in db.ventas.aggregate(pipeline):
+        print(fila)
+
+    sin_cliente = list(db.ventas.aggregate([
+        {"$lookup": {"from": "clientes", "localField": "cliente_id",
+                     "foreignField": "cliente_id", "as": "datos_cliente"}},
+        {"$match": {"datos_cliente": {"$size": 0}}},
+        {"$count": "ventas_sin_cliente"},
+    ]))
+    print("Ventas sin cliente relacionado:",
+          sin_cliente[0]["ventas_sin_cliente"] if sin_cliente else 0)
+
+
+# Ejercicio 7. DataFrame de ventas: head, info, nulos, describe
+def ejercicio7(db):
+    titulo("Ejercicio 7. DataFrame de ventas")
+    campos = {"_id": 0, "venta_id": 1, "cliente_id": 1, "estado": 1,
+              "canal": 1, "total": 1, "fecha": 1}
+    df = pd.DataFrame(list(db.ventas.find({}, campos)))
+    if df.empty:
+        print("No hay ventas para analizar")
+        return df
+
+    df["total"] = pd.to_numeric(df["total"].map(a_numero), errors="coerce")
+    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce", utc=True)
+    df["mes"] = df["fecha"].dt.strftime("%Y-%m")
+
+    print("Registros:", len(df))
+    print("\nhead():\n", df.head())
+    print("\ninfo():")
+    df.info()
+    print("\nNulos por columna:\n", df.isna().sum())
+    print("\ndescribe(include='all'):\n", df.describe(include="all"))
+    return df
+
+
+# Ejercicio 8. Pandas: número e importe de completadas por canal
+def ejercicio8(df):
+    titulo("Ejercicio 8. Ventas completadas por canal (Pandas)")
+    completadas = df.loc[df["estado"] == "completada"].copy()
+    print("Importe total completadas:", round(completadas["total"].sum(), 2))
+    por_canal = (completadas.groupby("canal", dropna=False)["total"]
+                 .agg(ventas="count", importe="sum", promedio="mean")
+                 .reset_index()
+                 .sort_values("canal"))
+    print(por_canal.to_string(index=False))
+    return por_canal
+
+
+# Ejercicio 9. Importe por mes + exportación de CSV
+def ejercicio9(df):
+    titulo("Ejercicio 9. Importe registrado por mes y exportación")
+    por_mes = (df.groupby("mes", dropna=False)["total"]
+               .agg(ventas="count", importe_registrado="sum")
+               .reset_index()
+               .sort_values("mes"))
+    print(por_mes.to_string(index=False))
+    por_mes.to_csv("Practica10-importe-por-mes.csv", index=False, encoding="utf-8-sig")
+    print("CSV generado: Practica10-importe-por-mes.csv")
+
+    resumen_estado = (df.groupby("estado", dropna=False)
+                      .agg(ventas=("total", "size"),
+                           importe_registrado=("total", "sum"))
+                      .reset_index()
+                      .sort_values("importe_registrado", ascending=False))
+    print("\nResumen por estado:\n", resumen_estado.to_string(index=False))
+    resumen_estado.to_csv("Practica10-resumen-estados.csv", index=False,
+                          encoding="utf-8-sig")
+    print("CSV generado: Practica10-resumen-estados.csv")
+    return resumen_estado
+
+
+# Ejercicio 10. Comparar por canal: MongoDB vs Pandas
+def ejercicio10(db, por_canal_pandas, resumen_estado, agregado_estado):
+    titulo("Ejercicio 10. Comparación por canal: MongoDB vs Pandas")
+    pipeline = [
+        {"$match": {"estado": "completada"}},
+        {"$group": {"_id": "$canal", "ventas": {"$sum": 1},
+                    "importe": {"$sum": "$total"}}},
+        {"$sort": {"_id": 1}},
+    ]
+    mongo = pd.DataFrame([
+        {"canal": f["_id"], "ventas_mongo": f["ventas"],
+         "importe_mongo": a_numero(f["importe"])}
+        for f in db.ventas.aggregate(pipeline)
+    ])
+    pandas_ = por_canal_pandas.rename(columns={"ventas": "ventas_pandas",
+                                               "importe": "importe_pandas"})
+    comp = mongo.merge(pandas_[["canal", "ventas_pandas", "importe_pandas"]],
+                       on="canal", how="outer")
+    comp["dif_ventas"] = comp["ventas_mongo"] - comp["ventas_pandas"]
+    comp["dif_importe"] = (comp["importe_mongo"] - comp["importe_pandas"]).round(2)
+    print(comp.to_string(index=False))
+
+    if (comp["dif_ventas"].fillna(1) == 0).all() and (comp["dif_importe"].fillna(1).abs() < 0.01).all():
+        print("\nConclusión: ambos métodos coinciden en conteos e importes por canal.")
+    else:
+        print("\nConclusión: hay diferencias. Causas posibles:")
+        print(" - $sum en MongoDB ignora valores no numéricos; Pandas los convierte a NaN con coerce.")
+        print(" - Canal nulo/faltante: MongoDB lo agrupa como None; Pandas con dropna=False como NaN.")
+        print(" - Decimal128 se convirtió a float en Pandas (diferencias mínimas por redondeo).")
+
+    mongo_estado = pd.DataFrame(agregado_estado).rename(columns={"_id": "estado"})
+    chequeo = mongo_estado.merge(resumen_estado, on="estado", suffixes=("_mongo", "_pandas"))
+    print("\nResumen por estado (CSV vs pipeline):\n", chequeo.to_string(index=False))
+
+
+# Ejercicio 11. Análisis adicional: filtro + agrupación + exportación
+# Top 10 clientes por importe de ventas completadas, con su nombre
+def ejercicio11(db, df):
+    titulo("Ejercicio 11. Top 10 clientes por importe de ventas completadas")
+    completadas = df.loc[df["estado"] == "completada"]          # filtro
+    top = (completadas.groupby("cliente_id")["total"]             # agrupación
+           .agg(compras="count", importe="sum", ticket_promedio="mean")
+           .reset_index()
+           .sort_values("importe", ascending=False)
+           .head(10))
+
+    nombres = pd.DataFrame(list(db.clientes.find({}, {"_id": 0, "cliente_id": 1, "nombre": 1})))
+    if not nombres.empty:
+        top = top.merge(nombres, on="cliente_id", how="left")
+        top = top[["cliente_id", "nombre", "compras", "importe", "ticket_promedio"]]
+    top["ticket_promedio"] = top["ticket_promedio"].round(2)
+    print(top.to_string(index=False))
+
+    top.to_csv("Practica10-analisis-adicional.csv", index=False, encoding="utf-8-sig")  # exportación
+    print("CSV generado: Practica10-analisis-adicional.csv")
+
+
+def main():
+    cliente = MongoClient(URI, serverSelectionTimeoutMS=5000)
+    try:
+        db = cliente[BASE]
+        ejercicio1(cliente, db)
+        ejercicio2(db)
+        ejercicio3(db)
+        ejercicio4(db)
+        agregado_estado = ejercicio5(db)
+        ejercicio6(db)
+        df = ejercicio7(db)
+        if df.empty:
+            return
+        por_canal = ejercicio8(df)
+        resumen_estado = ejercicio9(df)
+        ejercicio10(db, por_canal, resumen_estado, agregado_estado)
+        ejercicio11(db, df)
+    except PyMongoError as exc:
+        print("Error al comunicarse con MongoDB:", exc)
+    finally:
+        cliente.close()
+        print("\nConexión cerrada")
+
+
+if __name__ == "__main__":
+    main()
